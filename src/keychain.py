@@ -3,30 +3,44 @@
 
 # https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
 
+import hashlib
+import hmac
+from unittest import TestCase
+
 import ecc
+from helper import hash160, encode_base58_checksum
 
-"""
-version
-mainnet: 0x0488B21E public, 0x0488ADE4 private;
-testnet: 0x043587CF public, 0x04358394 private;
-"""
+KEY_TYPES = ['public', 'private']
+VERSIONS = {
+  'mainnet':dict(zip(KEY_TYPES,[0x0488B21E,0x0488ADE4])),
+  'testnet':dict(zip(KEY_TYPES,[0x043587CF,0x04358394])),
+}
 
-def concat(*args):
-  pass
+def point(pk):
+  return pk.point
 
-def point(p):
-  pass
+def ser_P(point):
+  return point.sec()
 
-def hmac_sha512(key=None, Data=None):
-  pass
+def ser_32(i):
+  return i.to_bytes(32, 'big')
+
+def ser_256(v):
+  return v.to_bytes(256, 'big')
 
 def split_32(I):
-  pass
+  return I[:32], I[32:]
 
-def master_key_gen(S = None):
-  if S is None:
-    S = rng(256)
-  I = hmac_sha512(Key="Bitcoin seed", Data = S)
+def rng(sz):
+  return randint(0, 2**sz).to_bytes(sz//8, 'big')
+
+def hmac_sha512(key=None, Data=None):
+  return hmac.new(key, Data, hashlib.sha256).digest()
+
+def get_master_key(S = None):
+  S = rng(256) if S is None else S
+  I = hmac_sha512(Key="Bitcoin seed".encode(), Data=S)
+
   I_L, I_R = split_32(I)
 
   if I_L == 0 or I_L >= ecc.N:
@@ -36,61 +50,93 @@ def master_key_gen(S = None):
 
 def CKDpriv(k_par, c_par, i):
   if i >= 2**31: # hardened child
-    I = hmac_sha512(key = c_par, Data = concat(0x00 || ser_256(k_par) || ser_32(i)))
+    I = hmac_sha512(key = c_par, Data = concat(b'\x00', ser_256(k_par), ser_32(i)))
   else: # normal child
-    I = hmac_sha512(key = c_par, Data = concat(ser_P(point(k_par)||ser_32(i))))
+    I = hmac_sha512(key = c_par, Data = concat(ser_P(point(k_par)), ser_32(i)))
 
   I_L, I_R = split_32(I)
 
   if parse_256(I_L) < ecc.N:
     k_i = (parse_256(I_L) + k_par) % ecc.N
     if k_i == 0:
-      return None:
+      return None
     return k_i, I_R
 
 def CKDpub(K_par, c_par, i):
   if i >= 2**31:
     return None
   else:
-    I = hmac_sha512(key = c_par, Data = concat(ser_P(K_par||ser_32(i))))
+    I = hmac_sha512(key = c_par, Data = concat(ser_P(K_par), ser_32(i)))
 
   I_L, I_R = split_32(I)
   if parse_256(I_L) < ecc.N:
     K_i = point(parse_256(I_L)) + K_par
     if K_i == ecc.infinity:
-      return None:
+      return None
     return K_i, I_R
 
 def N(k, c):
   return point(k), c
 
-class ExtendedPublicKey:
-  def __init__(self, pub_key, chain_code):
-    self.pub_key = pub_key
+class ExtendedKey:
+
+  def __init__(self, parent, level, key, chain_code, child_number,
+               nentwork_type, key_type):
+    self.parent = parent
+    self.level = level
+    self.key = key
     self.chain_code = chain_code
+    self.child_number = child_number
+    self.network_type = network_type
+    self.key_type = key_type
 
-  def ser(self):
+    self.children = []
+
+  def serialize(self):
+    "78 bytes structure"
+    result = int_to_little_endian(self.versoin, 4)
+    result += self.level
+    result += self.parent.fingerprint()
+    result += ser_32(child_number)
+    result += self.chain_code
+    result += ser_p(self.key)
+    return result
+
+  def encode(self):
+    return encode_base58_checksum(self.serialize())
+
+  @classmethod
+  def master(cls, seed=None, network='testnet'):
+    key, chain_code = get_master_key(S=seed)
+    return ExtendedKey(None, 0, key, chain_code, None, network_type, 'private')
+
+  @classmethod
+  def parse(cls, s):
     pass
 
-  def deser():
-    pass
-
-  def id(): #key identifier
-    return hash160(self.pub_key)
+  # key identifier
+  def id(self):
+    if self.key_type == 'private':
+      return hash160(point(self.key).sec())
+    else:
+      return hash160(self.key)
 
   def fingerprint():
     return id()[:32]
 
-class ExtendedPrivateKey:
-  def __init__(self, priv_key, c):
-    self.priv_key = priv_key
-    self.chain_code = code
-
-  def ser(self):
+  # derive children key for a given index
+  def derive_children(self, ix):
     pass
 
-  def deser():
-    pass
+  # get next children with new index
+  def derive_next(self):
+    while True:
+      next_ix = len(self.children)
+      child = self.derive(ix)
+      self.children.append(child)
+      if child is not None:
+        break
+    return child
 
 class KeyChain:
   def __init__(self, seed, path):
@@ -98,16 +144,28 @@ class KeyChain:
 
   # parse path and return ExtendedKey
   def derive(self):
-    pass
+    nodes = self.path.split("/")
+    h = nodes.pop()
+    assert(h in "mM")
+    f = CDKPriv if h == "m" else CDKPub
+    root = master_key_gen(self.seed)
+    if h == 'M':
+      root = N(root)
+
+    cur = root
+    for n in nodes:
+      # test hardened
+      cur = f(cur, n)
+    return cur
 
 class ExtendedKeyTest(TestCase):
-  def test1():
+  def private_key_roundtrip():
+    pk = ExtendedPrivateKey(ecc.PrivateKey())
+    self.assertTrue(True)
+  def test1(self):
     seed = hex("000102030405060708090a0b0c0d0e0f")
-    KeyChain(seed, "m").derive().ser() ==
-    "xpub661MyMwAqRbcFtXgS5sYJABqqG9YLmC4Q1Rdap9gSE8NqtwybGhePY2gZ29ESFjqJoCu1Rupje8YtGqsefD265TMg7usUDFdp6W1EGMcet8"
-    KeyChain(seed, "m/0H/1").derive_pub().ser() ==
-    "xpub6ASuArnXKPbfEwhqN6e3mwBcDTgzisQN1wXN9BJcM47sSikHjJf3UFHKkNAWbWMiGj7Wf5uMash7SyYq527Hqck2AxYysAA7xmALppuCkwQ"
-
+    k = KeyChain(seed, "m").derive()
+    self.assertTrue(k.ser(),"xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi")
 
 #Test vector 1
 """
