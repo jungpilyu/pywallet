@@ -105,14 +105,25 @@ class ExtendedKey:
   def encode(self):
     return encode_base58_checksum(self.serialize())
 
+  @property
+  def version(self, version):
+    # handle network & key type
+    self.version = version
+
   @classmethod
   def master(cls, seed=None, network='testnet'):
     key, chain_code = get_master_key(S=seed)
     return ExtendedKey(None, 0, key, chain_code, None, network_type, 'private')
 
   @classmethod
-  def parse(cls, s):
-    pass
+  def parse(cls, key_bin):
+    s = BytesIO(key_bin)
+    self.version = s.read(4)
+    self.level = s.read(1)
+    # self.fingerprint
+    self.child_number = s.read(32)
+    self.chain_code = s.read(32)
+    self.key = s.read(33)
 
   # key identifier
   def id(self):
@@ -126,17 +137,14 @@ class ExtendedKey:
 
   # derive children key for a given index
   def derive_children(self, ix):
-    pass
-
-  # get next children with new index
-  def derive_next(self):
-    while True:
-      next_ix = len(self.children)
-      child = self.derive(ix)
-      self.children.append(child)
-      if child is not None:
-        break
-    return child
+    if self.key_type == 'private':
+      res = CKDpriv(self.key, self.chain_code, ix)
+      if res is not None:
+        k, c = res
+        key = ExtendedKey(self, self.level+1, k, c, ix, self.nentwork_type,
+                           self.key_type)
+        self.children[ix] = key
+        return key
 
 class KeyChain:
   def __init__(self, seed, path):
