@@ -17,6 +17,8 @@ from helper import (
 )
 from script import Script
 
+#implement Multisig (Soobok.jin)
+
 class Tx:
 
     def __init__(self, version, tx_ins, tx_outs, locktime, testnet=False):
