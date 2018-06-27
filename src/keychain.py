@@ -79,85 +79,108 @@ def CKDpub(K_par, c_par, i):
 def N(k, c):
   return point(k), c
 
-class MasterKey(ExtendedKey):
-  def __init__(self, seed):
-    key, chain_code = get_master_key(seed)
-    ExtendedKey.__init__(self, None, 0, key, chain_code, 0, network_type, key_type)
-
-class ExtendedPrivateKey(ExtendedKey):
-  pass
-class ExtendedPublicKey(ExtendedKey):
-  pass
-
 class ExtendedKey:
-  def __init__(self, parent, level, key, chain_code, child_number,
-               nentwork_type, key_type):
+  def __init__(self, parent, level, key, chain_code, child_number, network):
     self.parent = parent
     self.level = level
     self.key = key
     self.chain_code = chain_code
     self.child_number = child_number
-    self.network_type = network_type
-    self.key_type = key_type
-
-    self.children = []
-
-  version = property(get_version, set_version)
-
-  def get_version(self):
-    return VERSIONS[(self.network_type, self.key_type)]
+    self.network = network
+    self.children = {}
 
   def set_version(self, version):
-    self.network_type, self.key_type = VER_RMAP[version]
+    self.network, self.key_type = VER_RMAP[version]
 
   def serialize(self):
     "78 bytes structure"
-    result = int_to_little_endian(self.versoin, 4)
+    result = int_to_little_endian(self.versoin(), 4)
     result += self.level
     result += self.parent.fingerprint()
     result += ser_32(child_number)
     result += self.chain_code
-    result += ser_p(self.key) if key_type=='public' else concat(b'\x00'||ser_256(self.key)
+    result += self.ser_key()
     return result
-
-  def encode(self):
-    return encode_base58_checksum(self.serialize())
-
-  @classmethod
-  def master(cls, seed=None, network='testnet'):
-    key, chain_code = get_master_key(S=seed)
-    return ExtendedKey(None, 0, key, chain_code, None, network_type, 'private')
 
   @classmethod
   def parse(cls, key_bin):
     s = BytesIO(key_bin)
-    self.version = s.read(4)
-    self.level = s.read(1)
-    # self.fingerprint
-    self.child_number = s.read(32)
-    self.chain_code = s.read(32)
-    self.key = s.read(33)
+    ver = s.read(4)
+    network, key_type = VER_RMAP[ver]
 
-  # key identifier
-  def id(self):
-    if self.key_type == 'private':
-      return hash160(point(self.key).sec())
-    else:
-      return hash160(self.key)
+    level = s.read(1)
+    fingerprint = s.read(32)
+    child_number = s.read(32)
+    chain_code = s.read(32)
+    key = s.read(33)
+    cls = ExtendedPrivateKey if key_type == 'private' else ExtendedPublicKey
+    # TODO: key handling
+    return cls(None, level, key, chain_code, child_number, network)
 
   def fingerprint():
     return id()[:32]
 
-  # derive children key for a given index
-  def derive(self, ix):
-    if self.key_type == 'private':
-      res = CKDpriv(self.key, self.chain_code, ix)
-      if res is not None:
-        k, c = res
-        key = ExtendedKey(self, self.level+1, k, c, ix, self.nentwork_type,
-                           self.key_type)
-        self.children[ix] = key
-        return key
+  def encode(self):
+    return encode_base58_checksum(self.serialize())
+
+
+class ExtendedPrivateKey(ExtendedKey):
+  def __init__(self, parent, level, key, chain_code, child_number, nentwork_type):
+    ExtendedKey.__init__(self, parent, level, key, chain_code, child_number, nentwork_type)
+
+  def version(self):
+    return VERSIONS[(self.network, 'private')]
+
+  def derive_private(self, ix):
+    if ix in self.children:
+      return self.children[ix]
+
+    res = CKDpriv(self.key, self.chain_code, ix)
+    if res is not None:
+      pk, chain_code = res
+      key = ExtendedPrivateKeyKey(self, self.level+1, pk, chain_code, ix,
+                        self.nentwork_type)
+      self.children[ix] = key
+      return key
+
+  def derive_pub(self, ix):
+    pk = self.derive_private(ix)
+    return pk.to_pub() if pk is not None else None
+
+  def identifier(self):
+    return hash160(self.key)
+
+  def ser_key(self):
+    return concat(b'\x00', ser_256(self.key))
+
+class ExtendedPublicKey(ExtendedKey):
+  def __init__(self, parent, level, key, chain_code, child_number, nentwork_type):
+    ExtendedKey.__init__(self, parent, level, key, chain_code, child_number, nentwork_type)
+
+  def version(self):
+    return VERSIONS[(self.network, 'public')]
+
+  def derive_private(self, ix):
+    raise Exception("Invalid operation")
+
+  def derive_pub(self, ix):
+    if ix in self.children:
+      return self.children[ix]
+
+    res = CKDpub(self.key, self.chain_code, ix)
+    if res is not None:
+      pk, chain_code = res
+      key = ExtendedPublicKeyKey(self, self.level+1, pk, chain_code, ix,
+                        self.nentwork_type)
+      self.children[ix] = key
+      return key
+
+  def identifier(self):
+    return hash160(point(self.key).sec())
+
+  def ser_key(self):
+    return ser_p(self.key)
+
 
 class KeyChain:
   def __init__(self, seed, path):
@@ -168,7 +191,6 @@ class KeyChain:
     nodes = self.path.split("/")
     h = nodes.pop()
     assert(h in "mM")
-    f = CDKPriv if h == "m" else CDKPub
     root = master_key_gen(self.seed)
     if h == 'M':
       root = N(root)
@@ -178,6 +200,14 @@ class KeyChain:
       # test hardened
       cur = f(cur, n)
     return cur
+
+class MasterKey(ExtendedPrivateKey):
+  def __init__(self, seed=None):
+    res = None
+    while res is None:
+      res = get_master_key(seed)
+    key, chain_code = res
+    ExtendedPrivateKey.__init__(self, None, 0, key, chain_code, 0, network_type)
 
 class ExtendedKeyTest(TestCase):
   def private_key_roundtrip():
